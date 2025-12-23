@@ -28,7 +28,7 @@ def get_se_intensity(chief, se_name, drug_name):
         return np.roll(chief, 15) # 1.5h shift
     if logic_type == 2: # Rebound (Velocity)
         grad = np.gradient(chief)
-        return np.where(grad < 0, np.abs(grad) * 130, 0)
+        return np.where(grad < 0, np.abs(grad) * 150, 0)
     return np.zeros_like(chief)
 
 # --- 3. THE UI BUILDER ---
