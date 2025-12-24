@@ -1,101 +1,146 @@
-import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+import streamlit as st
 from datetime import datetime, timedelta
 
-# --- STREAMLIT UI CONFIG ---
-st.set_page_config(page_title="Medication Timing Optimizer", layout="wide")
-st.title("💊 Medication Visual Engineering SaaS")
-st.markdown("""
-This tool visualizes **Pharmacokinetic (PK)** interactions and **Category 2 (Rebound)** symptoms 
-to help optimize dosage timing.
-""")
+# --- 1. CORE ENGINE (The Secret Sauce) ---
 
-# --- HELPER FUNCTIONS ---
-def parse_med_time(dt_str):
-    """Parses 'mm/dd time' (e.g., '12/24 10pm')."""
-    dt_str = dt_str.lower().strip()
-    full_str = f"{dt_str} 2025" 
-    formats = ["%m/%d %I%p %Y", "%m/%d %I:%M%p %Y", "%m/%d %H:%M %Y"]
-    for fmt in formats:
-        try: return datetime.strptime(full_str, fmt)
-        except ValueError: continue
-    return None
+def pk_model(t, dose, ka, ke):
+    """Standard 1-compartment PK model normalized to 0-100 scale."""
+    t = np.maximum(t, 0)
+    curve = (dose * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
+    return curve
 
-def pk_model(t_hours, ka, ke):
-    """Standard 1-compartment PK model (Unit Dose)."""
-    t = np.maximum(t_hours, 0)
-    return (1.0 * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
+def get_se_curve(chief_curve, category, t_axis):
+    """Generates Side Effect profiles based on Category logic."""
+    if category == "Category 1 (Trailing)":
+        # Shift curve by 1.5 hours (Lag)
+        return np.roll(chief_curve, 15) 
+    
+    elif category == "Category 2 (Rebound/Crash)":
+        # Logic: Starts after 50% dip from peak AND negative slope
+        peak_val = np.max(chief_curve)
+        peak_idx = np.argmax(chief_curve)
+        
+        # Calculate slope
+        slope = np.gradient(chief_curve)
+        
+        crash = np.zeros_like(chief_curve)
+        for i in range(len(chief_curve)):
+            if i > peak_idx and chief_curve[i] < (0.5 * peak_val) and slope[i] < 0:
+                # Intensity is proportional to the steepness of the drop
+                crash[i] = np.abs(slope[i]) * 10 
+        
+        # Normalize the crash for visual distinctness
+        if np.max(crash) > 0:
+            crash = (crash / np.max(crash)) * 80
+        return crash
+    
+    return np.zeros_like(chief_curve)
 
-def normalize(curve, target_max=100):
-    """Scales any curve to a 0-100 range for visual stability."""
-    if np.max(curve) == 0: return curve
-    return (curve / np.max(curve)) * target_max
+# --- 2. STREAMLIT UI ---
+
+st.set_page_config(page_title="Med-Engineer SaaS", layout="wide")
+st.title("💊 Clinical Timing Optimizer (SaaS MVP)")
+st.markdown("### Precision Side-Effect Mitigation Engine")
 
 # --- SIDEBAR INPUTS ---
-st.sidebar.header("User Inputs")
-abilify_in = st.sidebar.text_input("Primary Drug (e.g. Adderall) MM/DD Time:", "12/24 8am")
-clon_in = st.sidebar.text_input("Counter Drug (e.g. Clonazepam) MM/DD Time:", "12/24 2pm")
+with st.sidebar:
+    st.header("Patient Regimen")
+    
+    # Drug 1: The Primary
+    st.subheader("Primary Medication")
+    drug_a_name = st.selectbox("Select Drug", ["Abilify", "Adderall IR", "Lexapro"])
+    date_a = st.date_input("Date (Drug A)", datetime(2025, 12, 21))
+    time_a = st.time_input("Time (Drug A)", value=datetime.strptime("08:00", "%H:%M"))
+    
+    # Drug 2: The Counter-Med
+    st.subheader("Counter Medication")
+    drug_b_name = st.selectbox("Select Counter-Drug", ["Clonazepam", "Xanax", "Propranolol"])
+    date_b = st.date_input("Date (Drug B)", datetime(2025, 12, 21))
+    time_b = st.time_input("Time (Drug B)", value=datetime.strptime("14:00", "%H:%M"))
 
-dt_1 = parse_med_time(abilify_in)
-dt_2 = parse_med_time(clon_in)
+    st.header("Side Effect Profile")
+    se_type = st.radio("Side Effect Type", ["Category 1 (Trailing)", "Category 2 (Rebound/Crash)"])
 
-if dt_1 and dt_2:
-    # --- ENGINE ---
-    start_plot = min(dt_1, dt_2) - timedelta(hours=2)
-    h_axis = np.linspace(0, 36, 1000) 
+# --- 3. DATA PROCESSING ---
 
-    t_since_1 = np.array([((start_plot + timedelta(hours=h)) - dt_1).total_seconds()/3600 for h in h_axis])
-    t_since_2 = np.array([((start_plot + timedelta(hours=h)) - dt_2).total_seconds()/3600 for h in h_axis])
+# Define Constants (Approximated)
+# [ka, ke, t_max_approx]
+params = {
+    "Abilify": [1.0, 0.009, 4], 
+    "Adderall IR": [1.1, 0.069, 3],
+    "Lexapro": [0.8, 0.023, 5],
+    "Clonazepam": [1.8, 0.019, 2],
+    "Xanax": [1.5, 0.05, 1],
+    "Propranolol": [1.2, 0.17, 1.5]
+}
 
-    # 1. Primary Drug Logic (e.g., Adderall)
-    # Tmax ~3h, Half-life ~10h
-    conc_1 = pk_model(t_since_1, 1.1, np.log(2)/10)
-    conc_1_norm = normalize(conc_1, 100)
+# Setup Timeline
+start_dt = datetime.combine(date_a, time_a)
+dt_a = start_dt
+dt_b = datetime.combine(date_b, time_b)
 
-    # 2. Category 2: REBOUND LOGIC (The "Crash")
-    # UPDATED: Trigger only when declining AND concentration < 50% of peak
-    dC_dt = np.gradient(conc_1_norm, h_axis)
-    crash_trigger = np.where((dC_dt < 0) & (conc_1_norm < 50), np.abs(dC_dt), 0)
-    crash_norm = normalize(crash_trigger, 85) 
+h_axis = np.linspace(0, 36, 1000)
+t_since_a = np.array([((start_dt + timedelta(hours=h)) - dt_a).total_seconds()/3600 for h in h_axis])
+t_since_b = np.array([((start_dt + timedelta(hours=h)) - dt_b).total_seconds()/3600 for h in h_axis])
 
-    # 3. Counter Drug Logic (e.g., Clonazepam)
-    conc_2 = pk_model(t_since_2, 1.8, np.log(2)/35)
-    conc_2_norm = normalize(conc_2, 100)
+# Calculate Curves
+p_a = params[drug_a_name]
+p_b = params[drug_b_name]
 
-    # --- VISUALIZATION ---
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.set_facecolor('#fbfbfb')
+chief_a = pk_model(t_since_a, 100, p_a[0], p_a[1])
+# Normalize Chief A
+chief_a = (chief_a / np.max(chief_a)) * 100
 
-    # Plotting
-    ax.plot(h_axis, conc_1_norm, color='#FF8C00', label='Primary Drug (Conc.)', lw=2.5)
-    ax.plot(h_axis, crash_norm, color='#8E44AD', ls='--', label='Category 2: Crash (Starts at <50% Conc.)', lw=2)
-    ax.plot(h_axis, conc_2_norm, color='#27AE60', label='Counter Drug (Relief)', lw=3)
+side_effect = get_se_curve(chief_a, se_type, h_axis)
 
-    # The Neutralization Window
-    mitigation = np.minimum(crash_norm, conc_2_norm)
-    ax.fill_between(h_axis, 0, mitigation, color='#F1C40F', alpha=0.4, label='Neutralization Window')
+chief_b = pk_model(t_since_b, 100, p_b[0], p_b[1])
+# Normalize Chief B to be distinct but balanced
+chief_b = (chief_b / np.max(chief_b)) * 90 if np.max(chief_b) > 0 else chief_b
 
-    # X-Axis Formatting
-    tick_indices = np.arange(0, 37, 4)
-    ax.set_xticks(tick_indices)
-    ax.set_xticklabels([(start_plot + timedelta(hours=int(h))).strftime("%m/%d\n%I%p") for h in tick_indices])
+# Calculate Mitigation Percentage
+mitigation_area = np.minimum(side_effect, chief_b)
+total_se_area = np.sum(side_effect)
+mitigation_pct = (np.sum(mitigation_area) / total_se_area * 100) if total_se_area > 0 else 0
 
-    ax.set_title("Clinical Decision Support: Timing Optimization", fontsize=14)
-    ax.set_xlabel("Time of Day")
-    ax.set_ylabel("Normalized Intensity (%)")
-    ax.legend(loc='upper right')
-    ax.grid(alpha=0.2, linestyle=':')
+# --- 4. VISUALIZATION ---
 
-    st.pyplot(fig)
+fig, ax = plt.subplots(figsize=(12, 6))
+ax.plot(h_axis, chief_a, color='#3498db', label=f'{drug_a_name} (Conc.)', alpha=0.5)
+ax.plot(h_axis, side_effect, color='#e74c3c', ls='--', label=f'Predicted {se_type}', lw=2)
+ax.plot(h_axis, chief_b, color='#2ecc71', label=f'{drug_b_name} (Relief)', lw=3)
 
-    # --- ACTIONABLE INSIGHT ---
-    st.subheader("Analysis & Recommendations")
-    max_mitigation = np.max(mitigation)
-    if max_mitigation > 40:
-        st.success(f"Optimal Timing Detected! The counter-drug successfully neutralizes {int(max_mitigation)}% of the crash intensity.")
-    else:
-        st.warning("Sub-optimal Timing: The relief peak does not align with the crash peak. Consider shifting the counter-drug dose time.")
+ax.fill_between(h_axis, 0, mitigation_area, color='#f1c40f', alpha=0.4, label='Symptom Mitigation Zone')
 
-else:
-    st.error("Please enter a valid date and time in the sidebar (MM/DD HHam/pm).")
+# Formatting
+ax.set_title(f"Medication Engineering: {drug_a_name} vs. {se_type}", fontsize=14)
+ax.set_xlabel("Hours Since First Dose")
+ax.set_ylabel("Normalized Intensity (%)")
+ax.set_ylim(0, 110)
+ax.grid(alpha=0.2)
+ax.legend()
+
+# Display in Streamlit
+st.pyplot(fig)
+
+# --- 5. OUT-OF-THE-BOX IP FEATURES ---
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric("Mitigation Score", f"{int(mitigation_pct)}%")
+    st.caption("How much of the side effect is covered by the counter-med.")
+
+with col2:
+    risk_level = "High" if mitigation_pct < 40 else "Low"
+    st.metric("Patient Vulnerability", risk_level)
+    st.caption("Risk of dropout due to side effects.")
+
+with col3:
+    # Logic to suggest better timing
+    best_time = "Shift counter-med by +2 hours" if mitigation_pct < 60 else "Timing Optimal"
+    st.metric("AI Recommendation", best_time)
+    st.caption("Suggested timing adjustment.")
+
+st.info("**IP Note:** This model uses Rebound Velocity logic for Category 2 symptoms, triggering only after a 50% decline in plasma levels.")
