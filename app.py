@@ -1,91 +1,83 @@
-import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-# --- 1. THE DATA REGISTRY (The "Sauce") ---
-DRUG_DB = {
-    "Abilify (Aripiprazole)": {"ka": 1.0, "ke": np.log(2)/75, "side_effects": {"Akathisia": 1, "Insomnia": 1, "Crash": 2}},
-    "Adderall IR": {"ka": 1.1, "ke": np.log(2)/10, "side_effects": {"Anxiety": 1, "Crash": 2}},
-    "Lexapro (Escitalopram)": {"ka": 0.8, "ke": np.log(2)/30, "side_effects": {"Nausea": 1, "Fatigue": 1}}
-}
+def parse_med_time(dt_str):
+    """Parses 'mm/dd time' (e.g., '12/24 10pm')."""
+    dt_str = dt_str.lower().strip()
+    full_str = f"{dt_str} 2025" 
+    formats = ["%m/%d %I%p %Y", "%m/%d %I:%M%p %Y", "%m/%d %H:%M %Y"]
+    for fmt in formats:
+        try: return datetime.strptime(full_str, fmt)
+        except ValueError: continue
+    return None
 
-COUNTER_DB = {
-    "Clonazepam": {"ka": 1.8, "ke": np.log(2)/35},
-    "Propranolol": {"ka": 2.0, "ke": np.log(2)/4},
-    "L-Theanine": {"ka": 1.5, "ke": np.log(2)/3}
-}
+def pk_model(t_hours, ka, ke):
+    """Standard 1-compartment PK model (Unit Dose)."""
+    t = np.maximum(t_hours, 0)
+    # Dose is set to 1 to allow for normalization later
+    return (1.0 * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
 
-# --- 2. THE ENGINE FUNCTIONS ---
-def pk_model(t, dose, drug_data):
-    t = np.maximum(t, 0)
-    ka, ke = drug_data["ka"], drug_data["ke"]
-    return (dose * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
+def normalize(curve, target_max=100):
+    """Scales any curve to a 0-100 range for visual stability."""
+    if np.max(curve) == 0: return curve
+    return (curve / np.max(curve)) * target_max
 
-def get_se_intensity(chief, se_name, drug_name):
-    logic_type = DRUG_DB[drug_name]["side_effects"][se_name]
-    if logic_type == 1: # Trailing
-        return np.roll(chief, 15) # 1.5h shift
-    if logic_type == 2: # Rebound (Velocity)
-        grad = np.gradient(chief)
-        return np.where(grad < 0, np.abs(grad) * 120, 0)
-    return np.zeros_like(chief)
+# --- INPUTS ---
+# Example: Adderall at 8am, Clonazepam at 2pm
+med1_in = input("Enter Primary Drug Date/Time (e.g. 12/24 8am): ")
+med2_in = input("Enter Counter Drug Date/Time (e.g. 12/24 2pm): ")
 
-# --- 3. THE UI BUILDER ---
-st.set_page_config(page_title="Neuro-Optimizer CDSS", layout="wide")
-st.title("🧠 Neuro-Optimizer: Clinical Decision Support")
-st.markdown("---")
+dt_1 = parse_med_time(med1_in)
+dt_2 = parse_med_time(med2_in)
 
-# Sidebar for Doctor Inputs
-with st.sidebar:
-    st.header("📋 Prescription Setup")
-    
-    # 1. Primary Medication
-    selected_drug = st.selectbox("Select Medication", list(DRUG_DB.keys()))
-    d_date = st.date_input("Start Date")
-    d_time = st.time_input("Dose Time")
-    
-    # 2. Side Effect Selection
-    se_list = list(DRUG_DB[selected_drug]["side_effects"].keys())
-    selected_se = st.selectbox("Monitor Side Effect", se_list)
-    
-    st.markdown("---")
-    
-    # 3. Counter Medication
-    selected_counter = st.selectbox("Counter Medication", ["None"] + list(COUNTER_DB.keys()))
-    c_time = st.time_input("Counter Dose Time", value=(datetime.combine(d_date, d_time) + timedelta(hours=4)).time())
-
-# --- 4. CALCULATION & VISUALIZATION ---
+# --- ENGINE ---
+start_plot = min(dt_1, dt_2) - timedelta(hours=2)
 h_axis = np.linspace(0, 36, 1000) 
-dose_dt = datetime.combine(d_date, d_time)
-counter_dt = datetime.combine(d_date, c_time)
 
-# Calculate offset in hours
-offset = (counter_dt - dose_dt).total_seconds() / 3600
+t_since_1 = np.array([((start_plot + timedelta(hours=h)) - dt_1).total_seconds()/3600 for h in h_axis])
+t_since_2 = np.array([((start_plot + timedelta(hours=h)) - dt_2).total_seconds()/3600 for h in h_axis])
 
-# Generate Curves
-chief_curve = pk_model(h_axis, 100, DRUG_DB[selected_drug])
-se_curve = get_se_intensity(chief_curve, selected_se, selected_drug)
+# 1. Primary Drug (e.g., Adderall Logic)
+# Tmax ~3h, Half-life ~10h
+conc_1 = pk_model(t_since_1, 1.1, np.log(2)/10)
+conc_1_norm = normalize(conc_1, 100)
 
-# Plotting
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(h_axis, chief_curve, label="Chief Concentration", color="blue", alpha=0.3)
-ax.plot(h_axis, se_curve, label=f"Risk: {selected_se}", color="red", ls="--", lw=2)
+# 2. Category 2: REBOUND LOGIC (The "Crash")
+# Calculate Velocity of Decline
+dC_dt = np.gradient(conc_1_norm, h_axis)
+# Trigger: Only when declining AND below 70% of max (the 'Deficit Threshold')
+crash_trigger = np.where((dC_dt < 0) & (conc_1_norm < 70), np.abs(dC_dt), 0)
+crash_norm = normalize(crash_trigger, 85) # Scaled to 85 so it stays slightly below the main drug
 
-if selected_counter != "None":
-    counter_curve = pk_model(h_axis - offset, 110, COUNTER_DB[selected_counter])
-    ax.plot(h_axis, counter_curve, label=f"Relief: {selected_counter}", color="green", lw=2.5)
-    
-    # Show Mitigation
-    mitigation = np.minimum(se_curve, counter_curve)
-    ax.fill_between(h_axis, 0, mitigation, color="gold", alpha=0.4, label="Mitigation Zone")
-    
-    # Metrics
-    score = int(np.sum(mitigation) / np.sum(se_curve) * 100) if np.sum(se_curve) > 0 else 0
-    st.metric("Mitigation Score", f"{score}%")
+# 3. Counter Drug (e.g., Clonazepam Logic)
+# Tmax ~2h, Half-life ~35h
+conc_2 = pk_model(t_since_2, 1.8, np.log(2)/35)
+conc_2_norm = normalize(conc_2, 100)
 
-ax.set_title(f"24-Hour Forecast: {selected_se} Management")
-ax.legend()
-st.pyplot(fig)
+# --- VISUALIZATION ---
+plt.figure(figsize=(14, 7), facecolor='#fbfbfb')
 
-st.info("💡 Tip: Adjust the 'Counter Dose Time' in the sidebar to maximize the Gold Mitigation Zone.")
+# Plotting Normalized Curves
+plt.plot(h_axis, conc_1_norm, color='#FF8C00', label='Primary Drug (Concentration)', lw=2.5)
+plt.plot(h_axis, crash_norm, color='#8E44AD', ls='--', label='Category 2: Rebound/Crash Risk', lw=2)
+plt.plot(h_axis, conc_2_norm, color='#27AE60', label='Counter Drug (Relief)', lw=3)
+
+# The Mitigation Area
+# Where the Relief (Green) meets the Rebound (Purple)
+mitigation = np.minimum(crash_norm, conc_2_norm)
+plt.fill_between(h_axis, 0, mitigation, color='#F1C40F', alpha=0.4, label='Neutralization Window')
+
+# Formatting
+tick_indices = np.arange(0, 37, 4)
+plt.xticks(tick_indices, [(start_plot + timedelta(hours=int(h))).strftime("%m/%d\n%I%p") for h in tick_indices])
+
+plt.title("Visual Decision Support: Normalized PK/PD Interaction Map", fontsize=15, fontweight='bold')
+plt.xlabel("Timeline (Calendar Time)", fontsize=12)
+plt.ylabel("Intensity / Saturation (%)", fontsize=12) # Standardized Y-axis
+plt.legend(loc='upper right', frameon=True, shadow=True)
+plt.grid(alpha=0.2, linestyle=':')
+plt.axhline(0, color='black', lw=1)
+
+plt.tight_layout()
+plt.show()
