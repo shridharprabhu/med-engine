@@ -1,128 +1,117 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-# --- 1. THE BRAIN: DRUG & SIDE EFFECT DICTIONARY ---
-# This allows the SaaS to scale. You just add rows here to add drugs.
-DRUG_DB = {
-    "Adderall IR": {"ka": 1.1, "ke": np.log(2)/10, "type": "Stimulant"},
-    "Abilify": {"ka": 1.0, "ke": np.log(2)/75, "type": "Antipsychotic"},
-    "Xanax": {"ka": 1.5, "ke": np.log(2)/12, "type": "Benzodiazepine"},
-    "Clonazepam": {"ka": 1.8, "ke": np.log(2)/35, "type": "Benzodiazepine"}
+# --- 1. CORE ENGINE: PHARMACOKINETICS ---
+def pk_model(t, dose, ka, ke):
+    """Standard 1-Compartment PK Model"""
+    t = np.maximum(t, 0)
+    return (dose * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
+
+# --- 2. DATASET: ABILIFY & COUNTER-MEDS ---
+# Based on FDA Labeling Data
+ABILIFY_DATA = {
+    "ka": 1.0, 
+    "ke": np.log(2) / 75, # 75h half-life
+    "dose": 100,
+    "side_effects": {
+        "Akathisia (Restlessness)": {"lag": 2.0, "color": "red", "type": "neurological"},
+        "Insomnia": {"lag": 4.0, "color": "orange", "type": "metabolic"},
+        "Nausea": {"lag": 0.5, "color": "magenta", "type": "direct"},
+        "Dizziness": {"lag": 1.0, "color": "brown", "type": "direct"},
+        "Fatigue/Somnolence": {"lag": 5.0, "color": "purple", "type": "metabolic"},
+        "Blurred Vision": {"lag": 2.0, "color": "gray", "type": "direct"},
+        "Anxiety": {"lag": 1.5, "color": "pink", "type": "neurological"},
+        "Tremor": {"lag": 2.5, "color": "darkred", "type": "neurological"},
+        "Dry Mouth": {"lag": 3.0, "color": "cyan", "type": "direct"},
+        "Headache": {"lag": 2.0, "color": "olive", "type": "direct"}
+    }
 }
 
-SIDE_EFFECT_DB = {
-    "Crash/Irritability": {"category": 2, "threshold": 0.50}, # Rebound (50% drop)
-    "Akathisia": {"category": 1, "lag": 1.5},                # Trailing (1.5h lag)
-    "Nausea": {"category": 1, "lag": 0.5},                   # Trailing (0.5h lag)
-    "Restlessness": {"category": 1, "lag": 1.0}              # Trailing (1.0h lag)
+COUNTER_MEDS = {
+    "None": None,
+    "Clonazepam": {"ka": 1.8, "ke": np.log(2) / 35, "t_max": 2.0},
+    "Propranolol": {"ka": 2.5, "ke": np.log(2) / 4.0, "t_max": 1.5},
+    "Melatonin": {"ka": 3.0, "ke": np.log(2) / 1.0, "t_max": 0.5},
+    "Guanfacine": {"ka": 1.2, "ke": np.log(2) / 17, "t_max": 3.0},
+    "Hydroxyzine": {"ka": 2.0, "ke": np.log(2) / 20, "t_max": 2.0},
+    "Benadryl": {"ka": 2.2, "ke": np.log(2) / 8, "t_max": 2.0},
+    "Zofran": {"ka": 2.8, "ke": np.log(2) / 3.5, "t_max": 1.5},
+    "Trazodone": {"ka": 1.5, "ke": np.log(2) / 10, "t_max": 2.0},
+    "Magnesium": {"ka": 0.8, "ke": np.log(2) / 12, "t_max": 4.0},
+    "Xanax": {"ka": 3.0, "ke": np.log(2) / 11, "t_max": 1.0}
 }
 
-# --- 2. HELPER FUNCTIONS ---
-def parse_med_time(dt_str):
-    dt_str = dt_str.lower().strip()
-    full_str = f"{dt_str} 2025" 
-    formats = ["%m/%d %I%p %Y", "%m/%d %I:%M%p %Y", "%m/%d %H:%M %Y"]
-    for fmt in formats:
-        try: return datetime.strptime(full_str, fmt)
-        except ValueError: continue
-    return None
+# --- 3. UI LAYOUT ---
+st.set_page_config(page_title="Med-Engineering Dashboard", layout="wide")
+st.title("💊 Multi-Million Dollar Idea: Med-Engineering Dashboard")
+st.subheader("Pilot Prototype: Abilify (Aripiprazole) Optimization")
 
-def pk_model(t_hours, ka, ke):
-    t = np.maximum(t_hours, 0)
-    return (1.0 * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
+with st.sidebar:
+    st.header("1. Primary Medication")
+    med = st.selectbox("Select Medicine", ["Abilify"])
+    
+    # Date/Time Input
+    st.header("2. Timing & Date")
+    dose_date = st.date_input("Dose Date", datetime(2025, 12, 9))
+    dose_time = st.time_input("Dose Time", value=datetime.strptime("10:00 PM", "%I:%M %p").time())
+    
+    # Side Effect Selection
+    st.header("3. Symptom Mapping")
+    selected_se = st.selectbox("Select Side Effect to Mitigate", list(ABILIFY_DATA["side_effects"].keys()))
+    
+    # Counter Med Selection
+    st.header("4. Counter-Medication")
+    counter_med = st.selectbox("Select Counter Medication", list(COUNTER_MEDS.keys()))
 
-def normalize(curve, target_max=100):
-    if np.max(curve) == 0: return curve
-    return (curve / np.max(curve)) * target_max
+# --- 4. CALCULATION ---
+dt_dose = datetime.combine(dose_date, dose_time)
+t_plot = np.linspace(0, 48, 1000) # 48 hour view
 
-# --- 3. STREAMLIT UI ---
-st.set_page_config(page_title="Medication Timing Optimizer", layout="wide")
-st.title("🛡️ Clinical Precision Optimizer")
+# Primary Curve
+abilify_conc = pk_model(t_plot, ABILIFY_DATA["dose"], ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
 
-col1, col2, col3 = st.columns(3)
+# Side Effect Curve (Custom Logic Kernel)
+se_lag = ABILIFY_DATA["side_effects"][selected_se]["lag"]
+se_color = ABILIFY_DATA["side_effects"][selected_se]["color"]
+side_effect_conc = pk_model(t_plot - se_lag, ABILIFY_DATA["dose"] * 0.8, ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
 
+# Recommender Logic
+peak_hour = t_plot[np.argmax(side_effect_conc)]
+predicted_peak_time = dt_dose + timedelta(hours=peak_hour)
+
+# Counter Med Curve
+counter_conc = np.zeros_like(t_plot)
+rec_time_str = "N/A"
+if counter_med != "None":
+    c_data = COUNTER_MEDS[counter_med]
+    # Optimal logic: Peak of counter med should hit at peak of side effect
+    optimal_offset = peak_hour - c_data["t_max"]
+    counter_conc = pk_model(t_plot - optimal_offset, 110, c_data["ka"], c_data["ke"])
+    rec_time = dt_dose + timedelta(hours=optimal_offset)
+    rec_time_str = rec_time.strftime("%m/%d %I:%M %p")
+
+# --- 5. SMART RECOMMENDER DISPLAY ---
+col1, col2 = st.columns(2)
 with col1:
-    st.subheader("1. Primary Medication")
-    main_med = st.selectbox("Select Medication", list(DRUG_DB.keys()))
-    main_time_str = st.text_input("Dose Time (MM/DD HHam/pm)", "12/24 8am")
-    side_effect = st.selectbox("Target Side Effect", list(SIDE_EFFECT_DB.keys()))
-
+    st.metric("Side Effect Peak Predicted", predicted_peak_time.strftime("%m/%d %I:%M %p"))
 with col2:
-    st.subheader("2. Counter Medication")
-    counter_med = st.selectbox("Select Counter-Drug", list(DRUG_DB.keys()), index=3)
-    counter_time_str = st.text_input("Counter Dose Time", "12/24 2pm")
+    st.metric("Recommended Counter-Med Time", rec_time_str)
 
-dt_1 = parse_med_time(main_time_str)
-dt_2 = parse_med_time(counter_time_str)
+# --- 6. PLOT ---
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.plot(t_plot, abilify_conc, label="Abilify (Blood Conc.)", color="blue", alpha=0.3)
+ax.plot(t_plot, side_effect_conc, label=f"RISK: {selected_se}", color=se_color, lw=3)
 
-if dt_1 and dt_2:
-    # --- 4. CALCULATION ENGINE ---
-    start_plot = dt_1 - timedelta(hours=2)
-    h_axis = np.linspace(0, 36, 1000) 
-    
-    # Times since doses
-    t_s1 = np.array([((start_plot + timedelta(hours=h)) - dt_1).total_seconds()/3600 for h in h_axis])
-    t_s2 = np.array([((start_plot + timedelta(hours=h)) - dt_2).total_seconds()/3600 for h in h_axis])
+if counter_med != "None":
+    ax.plot(t_plot, counter_conc, label=f"COUNTER: {counter_med}", color="green", lw=3)
+    # Highlight Mitigation
+    mitigation = np.minimum(side_effect_conc, counter_conc)
+    ax.fill_between(t_plot, 0, mitigation, color="gold", alpha=0.3, label="Mitigation Zone")
 
-    # Chief Curve
-    c1 = normalize(pk_model(t_s1, DRUG_DB[main_med]['ka'], DRUG_DB[main_med]['ke']))
-    
-    # Side Effect Logic
-    se_data = SIDE_EFFECT_DB[side_effect]
-    if se_data['category'] == 1:
-        # Category 1: Trailing
-        se_curve = normalize(pk_model(t_s1 - se_data['lag'], DRUG_DB[main_med]['ka'], DRUG_DB[main_med]['ke']), 85)
-    else:
-        # Category 2: Rebound (Velocity at <50%)
-        grad = np.gradient(c1, h_axis)
-        se_curve = normalize(np.where((grad < 0) & (c1 < se_data['threshold']*100), np.abs(grad), 0), 85)
-
-    # Counter Curve
-    c2 = normalize(pk_model(t_s2, DRUG_DB[counter_med]['ka'], DRUG_DB[counter_med]['ke']))
-
-    # --- 5. VISUALIZATION ---
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(h_axis, c1, color='#FF8C00', label=f'{main_med} (Main)', lw=2)
-    ax.plot(h_axis, se_curve, color='#8E44AD', ls='--', label=f'{side_effect} Risk', lw=2)
-    ax.plot(h_axis, c2, color='#27AE60', label=f'{counter_med} (Relief)', lw=3)
-    
-    # Yellow Mitigation Area
-    mitigation = np.minimum(se_curve, c2)
-    ax.fill_between(h_axis, 0, mitigation, color='#F1C40F', alpha=0.4, label='Neutralization')
-
-    # Formatting
-    tick_indices = np.arange(0, 37, 4)
-    ax.set_xticks(tick_indices)
-    ax.set_xticklabels([(start_plot + timedelta(hours=int(h))).strftime("%m/%d %I%p") for h in tick_indices])
-    ax.legend(loc='upper right')
-    ax.set_ylabel("Normalized Intensity %")
-    st.pyplot(fig)
-
-    # --- 6. RECOMMENDER SYSTEM ---
-    st.divider()
-    st.subheader("💡 Smart Recommender System")
-    
-    # Finding the peak of the side effect
-    se_peak_idx = np.argmax(se_curve)
-    se_peak_time = start_plot + timedelta(hours=h_axis[se_peak_idx])
-    
-    # Finding the "On-set time" of counter-med (Time to peak)
-    # Approx t_max for counter med
-    c_tmax = 1 / (DRUG_DB[counter_med]['ka'] - DRUG_DB[counter_med]['ke']) # Simplified tmax
-    
-    # Optimal recommendation logic
-    opt_dose_time = se_peak_time - timedelta(hours=2) # Subtracting peak-to-onset time
-    
-    rec_col1, rec_col2 = st.columns(2)
-    with rec_col1:
-        st.metric("Side Effect Peak Predicted", se_peak_time.strftime("%I:%M %p"))
-        st.write(f"The symptom **{side_effect}** is projected to reach maximum intensity at approximately {se_peak_time.strftime('%I:%M %p')}.")
-    
-    with rec_col2:
-        st.metric("Recommended Dose Time", opt_dose_time.strftime("%I:%M %p"))
-        st.info(f"To achieve maximum neutralization, administer **{counter_med}** at **{opt_dose_time.strftime('%I:%M %p')}**. This ensures the relief peak aligns with the symptom peak.")
-
-else:
-    st.warning("Awaiting valid time inputs to generate clinical map.")
+ax.set_xlabel("Hours since start")
+ax.set_ylabel("Intensity")
+ax.legend()
+st.pyplot(fig)
