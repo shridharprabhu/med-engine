@@ -1,139 +1,142 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 
-# --- 1. DRUG & SYMPTOM DATABASE ---
-DRUG_DB = {
-    "Sertraline (Zoloft)": {"ka": 0.5, "ke": 0.026, "symptoms": ["Nausea", "Insomnia", "Drowsiness"]},
-    "Escitalopram (Lexapro)": {"ka": 0.6, "ke": 0.023, "symptoms": ["Nausea", "Fatigue", "Insomnia"]},
-    "Bupropion (Wellbutrin)": {"ka": 1.2, "ke": 0.033, "symptoms": ["Agitation", "Insomnia", "Crash/Irritability"]},
-    "Venlafaxine (Effexor)": {"ka": 1.0, "ke": 0.138, "symptoms": ["Nausea", "Dizziness", "Brain Zaps (Rebound)"]},
-    "Duloxetine (Cymbalta)": {"ka": 0.4, "ke": 0.057, "symptoms": ["Nausea", "Dry Mouth", "Fatigue"]},
-    "Fluoxetine (Prozac)": {"ka": 0.3, "ke": 0.006, "symptoms": ["Insomnia", "Anxiety", "Nausea"]},
-    "Citalopram (Celexa)": {"ka": 0.6, "ke": 0.020, "symptoms": ["Drowsiness", "Insomnia", "Nausea"]},
-    "Trazodone": {"ka": 1.5, "ke": 0.115, "symptoms": ["Extreme Sedation", "Dizziness", "Dry Mouth"]},
-    "Alprazolam (Xanax)": {"ka": 1.5, "ke": 0.063, "symptoms": ["Sedation", "Rebound Anxiety", "Memory Fog"]},
-    "Lorazepam (Ativan)": {"ka": 1.2, "ke": 0.057, "symptoms": ["Sedation", "Dizziness", "Weakness"]},
-    "Clonazepam (Klonopin)": {"ka": 1.0, "ke": 0.023, "symptoms": ["Drowsiness", "Ataxia", "Fatigue"]},
-    "Methylphenidate (Ritalin)": {"ka": 1.8, "ke": 0.231, "symptoms": ["Crash/Irritability", "Heart Racing", "Insomnia"]},
-    "Lisdexamfetamine (Vyvanse)": {"ka": 0.7, "ke": 0.057, "symptoms": ["Late-Day Crash", "Insomnia", "Decreased Appetite"]},
-    "Amphetamine/Dextro (Adderall)": {"ka": 1.1, "ke": 0.069, "symptoms": ["Crash/Irritability", "Anxiety", "Insomnia"]},
-    "Quetiapine (Seroquel)": {"ka": 1.2, "ke": 0.115, "symptoms": ["Heavy Sedation", "Weight Gain Risk", "Dry Mouth"]},
-    "Aripiprazole (Abilify)": {"ka": 0.8, "ke": 0.009, "symptoms": ["Akathisia", "Restlessness", "Insomnia"]},
-    "Lamotrigine (Lamictal)": {"ka": 1.1, "ke": 0.027, "symptoms": ["Dizziness", "Drowsiness", "Rash Risk (Cumulative)"]},
-    "Buspirone": {"ka": 1.5, "ke": 0.231, "symptoms": ["Dizziness", "Nausea", "Headache"]},
-    "Mirtazapine": {"ka": 1.2, "ke": 0.034, "symptoms": ["Heavy Sedation", "Increased Appetite", "Dizziness"]},
-    "Hydroxyzine": {"ka": 1.4, "ke": 0.034, "symptoms": ["Sedation", "Dry Mouth", "Dizziness"]}
-}
-
-SYMPTOM_LOGIC = {
-    "Crash/Irritability": "rebound", "Brain Zaps (Rebound)": "rebound", "Rebound Anxiety": "rebound", "Late-Day Crash": "rebound",
-    "Akathisia": "trailing", "Nausea": "trailing", "Insomnia": "trailing", "Sedation": "trailing", 
-    "Extreme Sedation": "trailing", "Drowsiness": "trailing", "Dizziness": "trailing", "Restlessness": "trailing",
-    "Weight Gain Risk": "cumulative", "Rash Risk (Cumulative)": "cumulative"
-}
-
-# --- 2. CORE ENGINE ---
-def pk_model(t, ka, ke):
+# --- 1. CORE ENGINE: PHARMACOKINETICS ---
+def pk_model(t, dose, ka, ke):
+    """Standard 1-Compartment PK Model"""
     t = np.maximum(t, 0)
-    # 1-Compartment PK Equation
-    return (ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
+    # C(t) = [D*ka / (Vd*(ka-ke))] * (exp(-ke*t) - exp(-ka*t))
+    # Using normalized Vd=1 for relative intensity
+    return (dose * ka / (ka - 0.001 if ka == ke else ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
 
-def normalize(c, m=100):
-    max_val = np.max(c)
-    return (c / max_val) * m if max_val > 0 else c
+# Helper to fix NumPy version issues
+def calculate_area(y, x):
+    try:
+        return np.trapezoid(y, x) # NumPy 2.0+
+    except AttributeError:
+        return np.trapz(y, x) # NumPy < 2.0
 
-# --- 3. UI SETUP ---
-st.set_page_config(page_title="Med-Engine SaaS", layout="wide")
-st.title("🧠 Clinical Precision Medication Manager")
+# --- 2. DATASET: ABILIFY & COUNTER-MEDS ---
+ABILIFY_DATA = {
+    "ka": 1.0, 
+    "ke": np.log(2) / 75, # 75h half-life
+    "dose": 100,
+    "side_effects": {
+        "Akathisia (Restlessness)": {"lag": 2.5, "color": "#e74c3c", "type": "neurological"},
+        "Insomnia": {"lag": 4.0, "color": "#f39c12", "type": "metabolic"},
+        "Nausea": {"lag": 0.5, "color": "#9b59b6", "type": "direct"},
+        "Dizziness": {"lag": 1.0, "color": "#d35400", "type": "direct"},
+        "Fatigue/Somnolence": {"lag": 5.0, "color": "#34495e", "type": "metabolic"},
+        "Blurred Vision": {"lag": 2.0, "color": "#7f8c8d", "type": "direct"},
+        "Anxiety": {"lag": 1.5, "color": "#ff6b6b", "type": "neurological"},
+        "Tremor": {"lag": 2.5, "color": "#c0392b", "type": "neurological"},
+        "Dry Mouth": {"lag": 3.0, "color": "#1abc9c", "type": "direct"},
+        "Headache": {"lag": 2.0, "color": "#2c3e50", "type": "direct"}
+    }
+}
 
-col1, col2 = st.columns(2)
+COUNTER_MEDS = {
+    "None": None,
+    "Clonazepam": {"ka": 1.8, "ke": np.log(2) / 35, "t_max": 2.0},
+    "Propranolol": {"ka": 2.5, "ke": np.log(2) / 4.0, "t_max": 1.5},
+    "Melatonin": {"ka": 3.0, "ke": np.log(2) / 1.0, "t_max": 0.5},
+    "Guanfacine": {"ka": 1.2, "ke": np.log(2) / 17, "t_max": 3.0},
+    "Hydroxyzine": {"ka": 2.0, "ke": np.log(2) / 20, "t_max": 2.0},
+    "Benadryl": {"ka": 2.2, "ke": np.log(2) / 8, "t_max": 2.0},
+    "Zofran": {"ka": 2.8, "ke": np.log(2) / 3.5, "t_max": 1.5},
+    "Trazodone": {"ka": 1.5, "ke": np.log(2) / 10, "t_max": 2.0},
+    "Magnesium": {"ka": 0.8, "ke": np.log(2) / 12, "t_max": 4.0},
+    "Xanax": {"ka": 3.0, "ke": np.log(2) / 11, "t_max": 1.0}
+}
 
-with col1:
-    st.header("1. Primary Prescription")
-    main_med = st.selectbox("Select Primary Drug", list(DRUG_DB.keys()))
-    main_date = st.date_input("Dose Date", datetime.now(), key="d1")
-    main_time = st.time_input("Dose Time", time(8, 0), key="t1")
-    symptom = st.selectbox("Target Side Effect", DRUG_DB[main_med]["symptoms"])
+# --- 3. UI LAYOUT ---
+st.set_page_config(page_title="Med-Engineering AI", layout="wide")
+st.title("💊 Clinical Decision Support System: Med-Engineering")
+st.markdown("---")
 
-with col2:
-    st.header("2. Counteractive Strategy")
-    counter_med = st.selectbox("Select Counter Drug", list(DRUG_DB.keys()), index=10)
-    counter_date = st.date_input("Counter Dose Date", datetime.now(), key="d2")
-    counter_time = st.time_input("Counter Dose Time", time(14, 0), key="t2")
+col_sidebar, col_main = st.columns([1, 3])
 
-dt1 = datetime.combine(main_date, main_time)
-dt2 = datetime.combine(counter_date, counter_time)
-
-# --- 4. CALCULATION & GRAPHING ---
-if dt1 and dt2:
-    # Set 36h view window
-    start_plot = min(dt1, dt2) - timedelta(hours=2)
-    h_axis = np.linspace(0, 36, 1000)
+with col_sidebar:
+    st.header("⚙️ Configuration")
     
-    # Calculate time since doses for every point in the axis
-    ts1 = np.array([((start_plot + timedelta(hours=h)) - dt1).total_seconds()/3600 for h in h_axis])
-    ts2 = np.array([((start_plot + timedelta(hours=h)) - dt2).total_seconds()/3600 for h in h_axis])
+    # 1. Primary Med
+    st.subheader("1. Primary Medication")
+    med_select = st.selectbox("Medicine", ["Abilify (Aripiprazole)"])
+    
+    # 2. Timing
+    st.subheader("2. Schedule")
+    dose_date = st.date_input("Dose Date", datetime.now())
+    dose_time = st.time_input("Dose Time", value=datetime.strptime("10:00 PM", "%I:%M %p").time())
+    dt_dose = datetime.combine(dose_date, dose_time)
+    
+    # 3. Side Effect
+    st.subheader("3. Logic Kernel")
+    se_name = st.selectbox("Select Symptom", list(ABILIFY_DATA["side_effects"].keys()))
+    
+    # 4. Counter Med
+    st.subheader("4. Mitigation Strategy")
+    counter_select = st.selectbox("Counter Medication", list(COUNTER_MEDS.keys()))
 
-    m_pk = DRUG_DB[main_med]
-    c_pk = DRUG_DB[counter_med]
+with col_main:
+    # --- 4. CALCULATIONS ---
+    h_axis = np.linspace(0, 48, 1000) # 48 hour simulation
     
-    main_curve = normalize(pk_model(ts1, m_pk['ka'], m_pk['ke']))
-    counter_curve = normalize(pk_model(ts2, c_pk['ka'], c_pk['ke']))
+    # Abilify Curve
+    abilify_curve = pk_model(h_axis, ABILIFY_DATA["dose"], ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
     
-    # Symptom Curve Logic
-    logic = SYMPTOM_LOGIC.get(symptom, "trailing")
-    if logic == "rebound":
-        # Gradient logic for withdrawal
-        grad = np.gradient(main_curve, h_axis)
-        se_curve = normalize(np.where((grad < 0) & (main_curve < 50), np.abs(grad), 0), 85)
-    elif logic == "cumulative":
-        # Integration logic for toxicity
-        se_curve = normalize(np.cumsum(main_curve), 85)
-    else: 
-        # Trailing logic for peak-side effects
-        se_curve = normalize(pk_model(ts1 - 1.5, m_pk['ka'], m_pk['ke']), 85)
+    # Side Effect Curve (using the Lag Logic)
+    se_data = ABILIFY_DATA["side_effects"][se_name]
+    se_curve = pk_model(h_axis - se_data["lag"], ABILIFY_DATA["dose"] * 0.85, ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
+    
+    # Recommender Logic
+    peak_idx = np.argmax(se_curve)
+    peak_h = h_axis[peak_idx]
+    peak_time_dt = dt_dose + timedelta(hours=peak_h)
+    
+    # Counter Med Curve
+    counter_curve = np.zeros_like(h_axis)
+    rec_time_str = "N/A"
+    coverage = 0
+    
+    if counter_select != "None":
+        c_params = COUNTER_MEDS[counter_select]
+        # Align peaks: Dose counter-med such that its peak hits at the side effect's peak
+        opt_offset = peak_h - c_params["t_max"]
+        counter_curve = pk_model(h_axis - opt_offset, 115, c_params["ka"], c_params["ke"])
+        rec_dt = dt_dose + timedelta(hours=opt_offset)
+        rec_time_str = rec_dt.strftime("%m/%d %I:%M %p")
+        
+        # Calculate Mitigation Coverage (Yellow Area)
+        mitigated_area = calculate_area(np.minimum(se_curve, counter_curve), h_axis)
+        total_se_area = calculate_area(se_curve, h_axis)
+        coverage = (mitigated_area / total_se_area) * 100 if total_se_area > 0 else 0
 
-    # Mitigation Area Calculation
-    mitigation_curve = np.minimum(se_curve, counter_curve)
-    
-    # Version-safe area calculation (Replacing np.trapz with np.sum * dx)
-    dx = h_axis[1] - h_axis[0]
-    total_symptom_area = np.sum(se_curve) * dx
-    mitigated_area = np.sum(mitigation_curve) * dx
-    
-    mitigation_pct = (mitigated_area / total_symptom_area * 100) if total_symptom_area > 0 else 0
+    # Metrics Display
+    m_col1, m_col2, m_col3 = st.columns(3)
+    m_col1.metric("Predicted Peak Intensity", peak_time_dt.strftime("%I:%M %p"))
+    m_col2.metric("Recommended Counter-Dose", rec_time_str)
+    m_col3.metric("Symptom Mitigation Coverage", f"{coverage:.1f}%")
 
-    # Plot Generation
+    # --- 5. VISUALIZATION ---
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(h_axis, main_curve, label=f"Primary: {main_med}", color="#1f77b4", alpha=0.6)
-    ax.plot(h_axis, se_curve, label=f"Symptom: {symptom}", color="#d62728", ls="--")
-    ax.plot(h_axis, counter_curve, label=f"Relief: {counter_med}", color="#2ca02c", lw=3)
-    ax.fill_between(h_axis, 0, mitigation_curve, color="#FFD700", alpha=0.4, label=f"Mitigation ({mitigation_pct:.1f}%)")
+    ax.plot(h_axis, abilify_curve, label="Abilify Plasma Conc.", color="#3498db", alpha=0.3, lw=1)
+    ax.plot(h_axis, se_curve, label=f"Risk: {se_name}", color=se_data["color"], lw=3)
     
-    # UI polish
-    ax.set_xticks(np.arange(0, 37, 4))
-    ax.set_xticklabels([(start_plot + timedelta(hours=int(h))).strftime("%m/%d %I%p") for h in np.arange(0, 37, 4)])
-    ax.set_ylabel("Normalized Intensity (%)")
-    ax.set_xlabel("Time (36h Window)")
-    ax.legend(loc='upper right')
-    ax.grid(alpha=0.3)
+    if counter_select != "None":
+        ax.plot(h_axis, counter_curve, label=f"Shield: {counter_select}", color="#27ae60", lw=2)
+        mitigation = np.minimum(se_curve, counter_curve)
+        ax.fill_between(h_axis, 0, mitigation, color="#f1c40f", alpha=0.4, label="Mitigation Zone")
+
+    # Formatting
+    ax.set_title(f"Dynamic Modeling: {se_name} Mitigation", fontsize=14)
+    ax.set_xlabel("Hours Since First Dose")
+    ax.set_ylabel("Clinical Intensity")
+    ax.legend(frameon=True, loc='upper right')
+    ax.grid(alpha=0.2, ls='--')
     
     st.pyplot(fig)
-
-    # --- 5. ANALYTICS ---
-    st.markdown("---")
-    st.subheader("📊 Strategic Analysis & Optimization")
     
-    r_col1, r_col2, r_col3 = st.columns(3)
-    
-    se_peak_h = h_axis[np.argmax(se_curve)]
-    se_peak_t = start_plot + timedelta(hours=se_peak_h)
-    opt_dose_t = se_peak_t - timedelta(hours=2) # Lead time heuristic
-
-    r_col1.metric("Side Effect Peak", se_peak_t.strftime("%I:%M %p"))
-    r_col2.metric("Optimal Strategy Time", opt_dose_t.strftime("%I:%M %p"))
-    r_col3.metric("Mitigation Score", f"{int(mitigation_pct)}%")
-
-    st.info(f"**Clinical Insight:** Current alignment covers **{int(mitigation_pct)}%** of the symptom area. For 100% coverage, administer {counter_med} at **{opt_dose_t.strftime('%I:%M %p')}**.")
+    st.info(f"**Insight:** To neutralize the peak of {se_name}, the system recommends administering {counter_select} at **{rec_time_str}** to align the metabolic peaks perfectly.")
