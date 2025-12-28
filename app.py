@@ -1,13 +1,11 @@
 import streamlit as st
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
 # --- 1. CORE ENGINE: PHARMACOKINETICS ---
 def pk_model(t, dose, ka, ke):
     t = np.maximum(t, 0)
-    # Standard 1-compartment PK model
     return (dose * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
 
 # --- 2. DATASET ---
@@ -44,15 +42,15 @@ COUNTER_MEDS = {
 # --- 3. UI CONFIGURATION ---
 st.set_page_config(page_title="Med-Engineering v2", layout="wide")
 
+# ✅ FIXED: correct param name is unsafe_allow_html
 st.markdown(
     """
     <style>
-      :root { --card:#111827; --panel:#0b1220; --stroke:#243244; --accent:#60a5fa; }
+      :root { --card:#111827; --stroke:#243244; --accent:#60a5fa; }
       .stApp { background-color: #0e1117; color: white; }
       [data-testid="stSidebar"] { background: linear-gradient(180deg, #0b1220 0%, #0e1117 60%); }
       .block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; }
 
-      /* metric "cards" */
       div[data-testid="stMetric"] {
         background: rgba(17,24,39,0.85);
         border: 1px solid rgba(36,50,68,0.9);
@@ -63,15 +61,11 @@ st.markdown(
       div[data-testid="stMetricLabel"] { color: rgba(255,255,255,0.72); }
       div[data-testid="stMetricValue"] { font-size: 1.85rem; color: var(--accent); }
 
-      /* info box */
       div[data-testid="stAlert"] {
         border-radius: 14px;
         border: 1px solid rgba(36,50,68,0.9);
         background: rgba(17,24,39,0.55);
       }
-
-      /* tighten sidebar labels */
-      label, .stSelectbox label, .stDateInput label, .stTimeInput label { color: rgba(255,255,255,0.8) !important; }
     </style>
     """,
     unsafe_allow_html=True
@@ -96,7 +90,7 @@ abilify_conc = pk_model(t_plot, ABILIFY_DATA["dose"], ABILIFY_DATA["ka"], ABILIF
 se_info = ABILIFY_DATA["side_effects"][selected_se]
 se_curve = pk_model(t_plot - se_info["lag"], 80, ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
 
-# Recommender Logic: detect when side effect "starts developing"
+# Side effect "development" onset (15% of peak)
 se_threshold = np.max(se_curve) * 0.15
 onset_indices = np.where(se_curve > se_threshold)[0]
 se_onset_hour = float(t_plot[onset_indices[0]]) if len(onset_indices) > 0 else 0.0
@@ -105,13 +99,13 @@ predicted_peak_time = dt_dose + timedelta(hours=float(t_plot[np.argmax(se_curve)
 
 counter_conc = np.zeros_like(t_plot)
 rec_time_str = "None Selected"
-optimal_offset = None  # hours after dt_dose when counter-med dose should be taken
+optimal_offset = None
 
 if counter_med != "None":
     c_data = COUNTER_MEDS[counter_med]
 
-    # ✅ Fine-tuned: dose counter-med so its peak arrives right BEFORE / around side-effect development onset
-    # (t_max approximates "time to peak" from dosing)
+    # ✅ Fine-tuned recommendation:
+    # dose counter-med so it peaks right BEFORE side-effect onset
     optimal_offset = max(se_onset_hour - float(c_data["t_max"]), 0.0)
 
     counter_conc = pk_model(t_plot - optimal_offset, 110, c_data["ka"], c_data["ke"])
@@ -131,39 +125,25 @@ with m3:
 fig, ax = plt.subplots(figsize=(12.5, 5.4), facecolor="#0e1117")
 ax.set_facecolor("#0e1117")
 
-# Axis styling
 ax.tick_params(colors="white", which="both", labelsize=10)
 for spine in ax.spines.values():
     spine.set_color("#2b3443")
 
-# Plot base + side effect
 ax.plot(t_plot, abilify_conc, label="Abilify Conc.", color="#60a5fa", alpha=0.30, lw=1.25)
-ax.plot(
-    t_plot, se_curve,
-    label=f"{selected_se} (Side Effect Risk)",
-    color=se_info["color"],
-    lw=2.7,
-    alpha=0.95
-)
+ax.plot(t_plot, se_curve, label=f"{selected_se} (Side Effect Risk)", color=se_info["color"], lw=2.7, alpha=0.95)
 
-# Counter-med + shading (green = covered, light red = uncovered)
 if counter_med != "None":
     ax.plot(t_plot, counter_conc, label=f"Counter: {counter_med}", color="#22c55e", lw=2.5, alpha=0.95)
 
-    covered = np.minimum(se_curve, counter_conc)          # portion "preceded/covered"
-    uncovered = np.maximum(se_curve - counter_conc, 0.0)  # remaining risk
-
-    # ✅ Green area where counter is covering the side-effect curve
+    # ✅ Covered vs uncovered shading
+    covered = np.minimum(se_curve, counter_conc)
     ax.fill_between(t_plot, 0, covered, color="#22c55e", alpha=0.18, label="Covered by Counter-med")
-
-    # ✅ Light red area where counter is NOT covering the side-effect curve
     ax.fill_between(t_plot, covered, se_curve, color="#fb7185", alpha=0.18, label="Uncovered Risk")
 
-    # Optional vertical marker at recommended time (subtle)
     ax.axvline(optimal_offset, color="#22c55e", alpha=0.25, lw=1.2, linestyle="--")
 
-# X-axis: clean date/time labels, horizontal, not cramped
-tick_hours = np.arange(0, 49, 6)  # keep same cadence
+# ✅ Clean, readable time labels (horizontal / two-line)
+tick_hours = np.arange(0, 49, 6)
 time_labels = [
     (dt_dose + timedelta(hours=int(h))).strftime("%m/%d") + "\n" +
     (dt_dose + timedelta(hours=int(h))).strftime("%I:%M %p")
@@ -172,21 +152,12 @@ time_labels = [
 ax.set_xticks(tick_hours)
 ax.set_xticklabels(time_labels, color="white", rotation=0, ha="center")
 
-# Y-axis: keep tick labels clearly visible and horizontal
+# ✅ Y-axis tick labels: force horizontal (clean visibility)
 ax.tick_params(axis="y", labelrotation=0)
 ax.set_ylabel("Clinical Intensity", color="white", fontsize=12)
 
-# Grid + legend
 ax.grid(color="#2b3443", linestyle="--", alpha=0.35)
-leg = ax.legend(
-    facecolor="#111827",
-    edgecolor="#2b3443",
-    labelcolor="white",
-    loc="upper right",
-    framealpha=0.9
-)
+ax.legend(facecolor="#111827", edgecolor="#2b3443", labelcolor="white", loc="upper right", framealpha=0.9)
 
-# Improve margins so multiline x-labels don't clip
 fig.subplots_adjust(bottom=0.22, left=0.07, right=0.98, top=0.95)
-
 st.pyplot(fig)
