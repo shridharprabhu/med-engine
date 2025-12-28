@@ -4,139 +4,122 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-# --- 1. CORE ENGINE: PHARMACOKINETICS ---
+# --- 1. PK ENGINE ---
 def pk_model(t, dose, ka, ke):
     t = np.maximum(t, 0)
-    # Standard 1-compartment PK model
     return (dose * ka / (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
 
-# --- 2. DATASET ---
-ABILIFY_DATA = {
-    "ka": 1.0, "ke": np.log(2) / 75, "dose": 100,
-    "side_effects": {
-        "Akathisia (Restlessness)": {"lag": 2.0, "color": "#e74c3c"},
-        "Insomnia": {"lag": 4.0, "color": "#e67e22"},
-        "Nausea": {"lag": 0.5, "color": "#9b59b6"},
-        "Dizziness": {"lag": 1.0, "color": "#a04000"},
-        "Fatigue/Somnolence": {"lag": 5.0, "color": "#8e44ad"},
-        "Blurred Vision": {"lag": 2.0, "color": "#7f8c8d"},
-        "Anxiety": {"lag": 1.5, "color": "#f06292"},
-        "Tremor": {"lag": 2.5, "color": "#c0392b"},
-        "Dry Mouth": {"lag": 3.0, "color": "#1abc9c"},
-        "Headache": {"lag": 2.0, "color": "#273746"}
-    }
+# --- 2. DATA LIBRARY (The "Moat") ---
+# Tmax and Half-life sourced from FDA Structured Product Labeling (SPL)
+MEDS = {
+    "Abilify": {"ka": 1.0, "ke": np.log(2)/75, "tmax": 4.0},
+    "Seroquel": {"ka": 1.5, "ke": np.log(2)/7, "tmax": 1.5},
+    "Adderall IR": {"ka": 2.0, "ke": np.log(2)/10, "tmax": 3.0},
+    "Zoloft": {"ka": 0.5, "ke": np.log(2)/26, "tmax": 8.0},
+    "Lexapro": {"ka": 0.8, "ke": np.log(2)/30, "tmax": 5.0},
+    "Vyvanse": {"ka": 0.9, "ke": np.log(2)/12, "tmax": 3.5},
+    "Prozac": {"ka": 0.4, "ke": np.log(2)/120, "tmax": 7.0},
+    "Wellbutrin": {"ka": 1.2, "ke": np.log(2)/21, "tmax": 1.5},
+    "Risperdal": {"ka": 2.5, "ke": np.log(2)/20, "tmax": 1.0},
+    "Zyprexa": {"ka": 0.7, "ke": np.log(2)/33, "tmax": 6.0},
+    "Haldol": {"ka": 1.0, "ke": np.log(2)/24, "tmax": 4.0},
+    "Effexor": {"ka": 1.3, "ke": np.log(2)/5, "tmax": 2.0},
+    "Latuda": {"ka": 1.1, "ke": np.log(2)/18, "tmax": 2.0},
+    "Concerta": {"ka": 0.3, "ke": np.log(2)/4, "tmax": 8.0},
+    "Ritalin": {"ka": 2.0, "ke": np.log(2)/3, "tmax": 2.0},
+    "Paxil": {"ka": 0.6, "ke": np.log(2)/21, "tmax": 5.0},
+    "Lithium": {"ka": 1.5, "ke": np.log(2)/24, "tmax": 2.0},
+    "Xanax": {"ka": 3.0, "ke": np.log(2)/11, "tmax": 1.5},
+    "Ativan": {"ka": 2.0, "ke": np.log(2)/12, "tmax": 2.0},
+    "Klonopin": {"ka": 1.8, "ke": np.log(2)/35, "tmax": 2.5}
 }
 
-COUNTER_MEDS = {
+SIDE_EFFECTS = {
+    "Akathisia": {"lag": 2.0, "color": "#e74c3c"},
+    "Nausea": {"lag": 0.5, "color": "#9b59b6"},
+    "Insomnia": {"lag": 4.5, "color": "#e67e22"},
+    "Dizziness": {"lag": 1.0, "color": "#a04000"},
+    "Fatigue": {"lag": 5.0, "color": "#8e44ad"},
+    "Anxiety": {"lag": 1.5, "color": "#f06292"},
+    "Tremor": {"lag": 2.0, "color": "#c0392b"},
+    "Headache": {"lag": 2.5, "color": "#273746"},
+    "Brain Zaps": {"lag": 6.0, "color": "#1abc9c"},
+    "The Crash (Rebound)": {"lag": 7.0, "color": "#7f8c8d"}
+}
+
+COUNTERS = {
     "None": None,
-    "Clonazepam": {"ka": 1.8, "ke": np.log(2) / 35, "t_max": 2.0},
-    "Propranolol": {"ka": 2.5, "ke": np.log(2) / 4.0, "t_max": 1.5},
-    "Melatonin": {"ka": 3.0, "ke": np.log(2) / 1.0, "t_max": 0.5},
-    "Guanfacine": {"ka": 1.2, "ke": np.log(2) / 17, "t_max": 3.0},
-    "Hydroxyzine": {"ka": 2.0, "ke": np.log(2) / 20, "t_max": 2.0},
-    "Benadryl": {"ka": 2.2, "ke": np.log(2) / 8, "t_max": 2.0},
-    "Zofran": {"ka": 2.8, "ke": np.log(2) / 3.5, "t_max": 1.5},
-    "Trazodone": {"ka": 1.5, "ke": np.log(2) / 10, "t_max": 2.0},
-    "Magnesium": {"ka": 0.8, "ke": np.log(2) / 12, "t_max": 4.0},
-    "Xanax": {"ka": 3.0, "ke": np.log(2) / 11, "t_max": 1.0}
+    "Clonazepam": {"ka": 1.8, "ke": np.log(2)/35, "tmax": 2.5},
+    "Propranolol": {"ka": 2.5, "ke": np.log(2)/4, "tmax": 1.5},
+    "Melatonin": {"ka": 3.0, "ke": np.log(2)/1, "tmax": 0.5},
+    "Guanfacine": {"ka": 1.2, "ke": np.log(2)/17, "tmax": 3.0},
+    "Zofran": {"ka": 2.8, "ke": np.log(2)/3.5, "tmax": 1.5},
+    "Benadryl": {"ka": 2.2, "ke": np.log(2)/8, "tmax": 2.0},
+    "Hydroxyzine": {"ka": 2.0, "ke": np.log(2)/20, "tmax": 2.0},
+    "Trazodone": {"ka": 1.5, "ke": np.log(2)/10, "tmax": 2.0},
+    "Magnesium": {"ka": 0.8, "ke": np.log(2)/12, "tmax": 4.0},
+    "Xanax": {"ka": 3.0, "ke": np.log(2)/11, "tmax": 1.0}
 }
 
-# --- 3. UI CONFIGURATION ---
-st.set_page_config(page_title="Med-Engineering v2", layout="wide")
-
-# Fixed the CSS and the incorrect parameter name (unsafe_allow_html)
-st.markdown(
-    """
-    <style>
-    .stApp { background-color: #0e1117; color: white; }
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #3498db; }
-    div[data-testid="stMetric"] { 
-        background-color: #1f2937; 
-        padding: 15px; 
-        border-radius: 10px; 
-        border-left: 5px solid #3498db; 
-    }
-    </style>
-    """, 
-    unsafe_allow_html=True
-)
-
-st.title("🛡️ Chronopharmacology Dashboard")
-st.info("Precision Side-Effect Engineering for Aripiprazole (Abilify)")
+# --- 3. UI LAYOUT ---
+st.set_page_config(page_title="Med-Engine v3", layout="wide")
+st.markdown("<style>.stApp { background-color: #0e1117; color: white; }</style>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("📋 Clinical Inputs")
-    dose_date = st.date_input("Dose Date", datetime(2025, 12, 9))
-    dose_time = st.time_input("Dose Time", value=datetime.strptime("10:00 PM", "%I:%M %p").time())
-    selected_se = st.selectbox("Observed Side Effect", list(ABILIFY_DATA["side_effects"].keys()))
-    counter_med = st.selectbox("Select Counter Medication", list(COUNTER_MEDS.keys()))
+    st.header("💊 Primary Medication")
+    p_med = st.selectbox("Select Drug", list(MEDS.keys()))
+    p_date = st.date_input("Dose Date (Primary)", datetime(2025, 12, 9))
+    p_time = st.time_input("Dose Time (Primary)", value=datetime.strptime("10:00 PM", "%I:%M %p").time())
+    
+    st.header("🚩 Side Effect")
+    se_name = st.selectbox("Observed Symptom", list(SIDE_EFFECTS.keys()))
+    
+    st.header("🛡️ Counter Medication")
+    c_med = st.selectbox("Select Relief Drug", list(COUNTERS.keys()))
+    c_date = st.date_input("Dose Date (Counter)", datetime(2025, 12, 9))
+    c_time = st.time_input("Dose Time (Counter)", value=datetime.strptime("11:30 PM", "%I:%M %p").time())
 
-# --- 4. DATA PROCESSING ---
-dt_dose = datetime.combine(dose_date, dose_time)
+# --- 4. ENGINE CALCULATIONS ---
 t_plot = np.linspace(0, 48, 1000)
+dt_p = datetime.combine(p_date, p_time)
+dt_c = datetime.combine(c_date, c_time)
 
-abilify_conc = pk_model(t_plot, ABILIFY_DATA["dose"], ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
-se_info = ABILIFY_DATA["side_effects"][selected_se]
-# Generate side effect curve with the specific lag
-se_curve = pk_model(t_plot - se_info["lag"], 80, ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
+# Primary & SE Curves
+p_pk = MEDS[p_med]
+se_pk = SIDE_EFFECTS[se_name]
+p_conc = pk_model(t_plot, 100, p_pk["ka"], p_pk["ke"])
+se_conc = pk_model(t_plot - se_pk["lag"], 85, p_pk["ka"], p_pk["ke"])
 
-# Smart Recommender Logic: Proactive Mitigation
-# Find when side effect crosses 15% of its peak
-se_threshold = np.max(se_curve) * 0.15
-onset_indices = np.where(se_curve > se_threshold)[0]
-se_onset_hour = t_plot[onset_indices[0]] if len(onset_indices) > 0 else 0
+# Counter Curve
+c_conc = np.zeros_like(t_plot)
+offset_c = (dt_c - dt_p).total_seconds() / 3600
+if c_med != "None":
+    c_pk = COUNTERS[c_med]
+    c_conc = pk_model(t_plot - offset_c, 110, c_pk["ka"], c_pk["ke"])
 
-predicted_peak_time = dt_dose + timedelta(hours=t_plot[np.argmax(se_curve)])
+# Smart Recommender
+se_onset_h = t_plot[np.where(se_conc > (np.max(se_conc)*0.15))[0][0]] if any(se_conc > 0) else 0
+rec_time = dt_p + timedelta(hours=se_onset_h - (COUNTERS[c_med]["tmax"] if c_med != "None" else 0))
 
-counter_conc = np.zeros_like(t_plot)
-rec_time_str = "None Selected"
+# --- 5. DASHBOARD ---
+c1, c2 = st.columns(2)
+c1.metric("Predicted Symptom Peak", (dt_p + timedelta(hours=t_plot[np.argmax(se_conc)])).strftime("%I:%M %p"))
+c2.metric("Optimal Counter-Dose Time", rec_time.strftime("%I:%M %p") if c_med != "None" else "N/A")
 
-if counter_med != "None":
-    c_data = COUNTER_MEDS[counter_med]
-    # Set counter-med peak to occur at the side effect onset for early protection
-    optimal_offset = se_onset_hour 
-    counter_conc = pk_model(t_plot - optimal_offset, 110, c_data["ka"], c_data["ke"])
-    rec_time = dt_dose + timedelta(hours=optimal_offset)
-    rec_time_str = rec_time.strftime("%m/%d %I:%M %p")
-
-# --- 5. DASHBOARD METRICS ---
-m1, m2, m3 = st.columns(3)
-with m1: st.metric("Side Effect Peak", predicted_peak_time.strftime("%I:%M %p"))
-with m2: st.metric("Shield Onset Needed By", (dt_dose + timedelta(hours=se_onset_hour)).strftime("%I:%M %p"))
-with m3: st.metric("Recommended Dose Time", rec_time_str)
-
-# --- 6. MODERN VISUALIZATION ---
 fig, ax = plt.subplots(figsize=(12, 5), facecolor='#0e1117')
 ax.set_facecolor('#0e1117')
+ax.plot(t_plot, p_conc, color="#3498db", alpha=0.3, label=f"{p_med} Blood Level")
+ax.plot(t_plot, se_conc, color=se_pk["color"], lw=2, label=f"Risk: {se_name}")
 
-# Axis styling
-ax.tick_params(colors='white', which='both', labelsize=10)
-for spine in ax.spines.values(): 
-    spine.set_color('#333333')
+if c_med != "None":
+    ax.plot(t_plot, c_conc, color="#2ecc71", lw=2, label=f"Shield: {c_med}")
+    mitigated = np.minimum(se_conc, c_conc)
+    ax.fill_between(t_plot, 0, mitigated, color="#f1c40f", alpha=0.4, label="Mitigated")
+    ax.fill_between(t_plot, mitigated, se_conc, color="#e74c3c", alpha=0.15, label="Exposed Risk")
 
-# Plotting the data
-ax.plot(t_plot, abilify_conc, label="Abilify Conc.", color="#3498db", alpha=0.4, lw=1)
-ax.plot(t_plot, se_curve, label=f"{selected_se} (Side Effect Risk)", color=se_info["color"], lw=2.5, alpha=0.9)
-
-if counter_med != "None":
-    ax.plot(t_plot, counter_conc, label=f"Counter: {counter_med}", color="#2ecc71", lw=2.5)
-    
-    # Mathematical Shading Logic
-    mitigated = np.minimum(se_curve, counter_conc)
-    
-    # Shading zones
-    ax.fill_between(t_plot, 0, mitigated, color="#f1c40f", alpha=0.4, label="Mitigated Area")
-    ax.fill_between(t_plot, mitigated, se_curve, color="#e74c3c", alpha=0.2, label="Unmitigated Risk")
-
-# Clean X-Axis Time Labels (Horizontal)
-tick_indices = np.arange(0, 49, 6)
-time_labels = [(dt_dose + timedelta(hours=int(h))).strftime("%m/%d %I%p") for h in tick_indices]
-ax.set_xticks(tick_indices)
-ax.set_xticklabels(time_labels, color='white')
-
-ax.set_ylabel("Clinical Intensity", color='white', fontsize=12)
-ax.legend(facecolor='#1f2937', edgecolor='#333333', labelcolor='white', loc='upper right')
-plt.grid(color='#333333', linestyle='--', alpha=0.3)
-
-# Display in Streamlit
+# X-Axis Styling
+ticks = np.arange(0, 49, 6)
+ax.set_xticks(ticks)
+ax.set_xticklabels([(dt_p + timedelta(hours=int(h))).strftime("%m/%d\n%I%p") for h in ticks], color='white')
+ax.legend(facecolor='#1f2937', labelcolor='white')
 st.pyplot(fig)
