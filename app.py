@@ -42,34 +42,47 @@ COUNTER_MEDS = {
 # --- 3. UI CONFIGURATION ---
 st.set_page_config(page_title="Med-Engineering v2", layout="wide")
 
-# ✅ FIXED: correct param name is unsafe_allow_html
-st.markdown(
-    """
-    <style>
-      :root { --card:#111827; --stroke:#243244; --accent:#60a5fa; }
-      .stApp { background-color: #0e1117; color: white; }
-      [data-testid="stSidebar"] { background: linear-gradient(180deg, #0b1220 0%, #0e1117 60%); }
-      .block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+# IMPORTANT:
+# - st.markdown defaults to rendering Markdown safely.
+# - To apply CSS, we must set unsafe_allow_html=True.
+# If your Streamlit runtime is somehow injecting unsafe_allow_stdio, we avoid *all* kwargs by
+# using st.html where available, otherwise fall back to minimal UI without CSS.
+#
+# Streamlit versions differ; st.html may not exist in older versions. We handle both.
 
-      div[data-testid="stMetric"] {
-        background: rgba(17,24,39,0.85);
-        border: 1px solid rgba(36,50,68,0.9);
-        padding: 14px 16px;
-        border-radius: 14px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.25);
-      }
-      div[data-testid="stMetricLabel"] { color: rgba(255,255,255,0.72); }
-      div[data-testid="stMetricValue"] { font-size: 1.85rem; color: var(--accent); }
+CSS = """
+<style>
+  :root { --card:#111827; --stroke:#243244; --accent:#60a5fa; }
+  .stApp { background-color: #0e1117; color: white; }
+  [data-testid="stSidebar"] { background: linear-gradient(180deg, #0b1220 0%, #0e1117 60%); }
+  .block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; }
 
-      div[data-testid="stAlert"] {
-        border-radius: 14px;
-        border: 1px solid rgba(36,50,68,0.9);
-        background: rgba(17,24,39,0.55);
-      }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+  div[data-testid="stMetric"] {
+    background: rgba(17,24,39,0.85);
+    border: 1px solid rgba(36,50,68,0.9);
+    padding: 14px 16px;
+    border-radius: 14px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  }
+  div[data-testid="stMetricLabel"] { color: rgba(255,255,255,0.72); }
+  div[data-testid="stMetricValue"] { font-size: 1.85rem; color: var(--accent); }
+
+  div[data-testid="stAlert"] {
+    border-radius: 14px;
+    border: 1px solid rgba(36,50,68,0.9);
+    background: rgba(17,24,39,0.55);
+  }
+</style>
+"""
+
+# Try to inject CSS without using any suspicious kwargs.
+# 1) Prefer st.html if available
+# 2) Else use st.markdown with explicit unsafe_allow_html=True (correct Streamlit param)
+# If your deployment is somehow rewriting kwargs, st.html path avoids that.
+if hasattr(st, "html"):
+    st.html(CSS)
+else:
+    st.markdown(CSS, unsafe_allow_html=True)
 
 st.title("🛡️ Chronopharmacology Dashboard")
 st.info("Precision Side-Effect Engineering for Aripiprazole (Abilify)")
@@ -77,7 +90,10 @@ st.info("Precision Side-Effect Engineering for Aripiprazole (Abilify)")
 with st.sidebar:
     st.header("📋 Clinical Inputs")
     dose_date = st.date_input("Dose Date", datetime(2025, 12, 9))
-    dose_time = st.time_input("Dose Time", value=datetime.strptime("10:00 PM", "%I:%M %p").time())
+    dose_time = st.time_input(
+        "Dose Time",
+        value=datetime.strptime("10:00 PM", "%I:%M %p").time()
+    )
     selected_se = st.selectbox("Observed Side Effect", list(ABILIFY_DATA["side_effects"].keys()))
     counter_med = st.selectbox("Select Counter Medication", list(COUNTER_MEDS.keys()))
 
@@ -90,7 +106,7 @@ abilify_conc = pk_model(t_plot, ABILIFY_DATA["dose"], ABILIFY_DATA["ka"], ABILIF
 se_info = ABILIFY_DATA["side_effects"][selected_se]
 se_curve = pk_model(t_plot - se_info["lag"], 80, ABILIFY_DATA["ka"], ABILIFY_DATA["ke"])
 
-# Side effect "development" onset (15% of peak)
+# Side effect "develops" when it crosses 15% of its peak
 se_threshold = np.max(se_curve) * 0.15
 onset_indices = np.where(se_curve > se_threshold)[0]
 se_onset_hour = float(t_plot[onset_indices[0]]) if len(onset_indices) > 0 else 0.0
@@ -105,7 +121,7 @@ if counter_med != "None":
     c_data = COUNTER_MEDS[counter_med]
 
     # ✅ Fine-tuned recommendation:
-    # dose counter-med so it peaks right BEFORE side-effect onset
+    # Take counter-med so its peak lands right before side-effect development.
     optimal_offset = max(se_onset_hour - float(c_data["t_max"]), 0.0)
 
     counter_conc = pk_model(t_plot - optimal_offset, 110, c_data["ka"], c_data["ke"])
@@ -135,14 +151,15 @@ ax.plot(t_plot, se_curve, label=f"{selected_se} (Side Effect Risk)", color=se_in
 if counter_med != "None":
     ax.plot(t_plot, counter_conc, label=f"Counter: {counter_med}", color="#22c55e", lw=2.5, alpha=0.95)
 
-    # ✅ Covered vs uncovered shading
+    # ✅ Green covered area vs light red uncovered area
     covered = np.minimum(se_curve, counter_conc)
     ax.fill_between(t_plot, 0, covered, color="#22c55e", alpha=0.18, label="Covered by Counter-med")
     ax.fill_between(t_plot, covered, se_curve, color="#fb7185", alpha=0.18, label="Uncovered Risk")
 
+    # Subtle marker at recommended time
     ax.axvline(optimal_offset, color="#22c55e", alpha=0.25, lw=1.2, linestyle="--")
 
-# ✅ Clean, readable time labels (horizontal / two-line)
+# ✅ Clean x-axis labels (two-line, horizontal)
 tick_hours = np.arange(0, 49, 6)
 time_labels = [
     (dt_dose + timedelta(hours=int(h))).strftime("%m/%d") + "\n" +
@@ -152,7 +169,7 @@ time_labels = [
 ax.set_xticks(tick_hours)
 ax.set_xticklabels(time_labels, color="white", rotation=0, ha="center")
 
-# ✅ Y-axis tick labels: force horizontal (clean visibility)
+# ✅ Y-axis labels horizontal
 ax.tick_params(axis="y", labelrotation=0)
 ax.set_ylabel("Clinical Intensity", color="white", fontsize=12)
 
