@@ -3,4 +3,5 @@ matplotlib
 
 numpy
 nginx
-supabase
+supabase-py
+
