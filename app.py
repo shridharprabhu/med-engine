@@ -1,10 +1,6 @@
-import requests
-import streamlit as st
-import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta, date
-from supabase import create_client, Client
 
+import streamlit as st
+from supabase import create_client, Client
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
@@ -75,6 +71,15 @@ def require_auth():
         st.caption("Fix: Insert a row in public.profiles for this user in Supabase.")
         st.caption(str(e))
         st.stop()
+
+
+import requests
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta, date
+
+
+
 
 
 
