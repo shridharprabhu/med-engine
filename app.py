@@ -3,6 +3,87 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta, date
+from supabase import create_client, Client
+
+
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
+
+@st.cache_resource
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+supabase = get_supabase()
+
+def login_ui():
+    st.title("Clinic Dashboard Login")
+
+    with st.form("login_form"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log in")
+
+    if submitted:
+        try:
+            auth_res = supabase.auth.sign_in_with_password(
+                {"email": email, "password": password}
+            )
+            st.session_state["sb_session"] = auth_res.session
+            st.session_state["sb_user"] = auth_res.user
+            st.success("Logged in!")
+            st.rerun()
+        except Exception as e:
+            st.error("Login failed.")
+            st.caption(str(e))
+
+def logout_button():
+    if st.sidebar.button("Log out"):
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+        st.session_state.clear()
+        st.rerun()
+
+def fetch_profile(user_id: str, access_token: str):
+    authed = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    authed.postgrest.auth(access_token)
+
+    res = (
+        authed.table("profiles")
+        .select("user_id, clinic_id, role, full_name")
+        .eq("user_id", user_id)
+        .single()
+        .execute()
+    )
+    return res.data
+
+def require_auth():
+    sess = st.session_state.get("sb_session")
+    user = st.session_state.get("sb_user")
+
+    if not sess or not user:
+        login_ui()
+        st.stop()
+
+    # Load profile (clinic_id + role)
+    try:
+        profile = fetch_profile(user.id, sess.access_token)
+        st.session_state["profile"] = profile
+    except Exception as e:
+        st.error("Logged in, but profile not found / not accessible.")
+        st.caption("Fix: Insert a row in public.profiles for this user in Supabase.")
+        st.caption(str(e))
+        st.stop()
+
+
+
+
+
+
+
+
+
 
 # ----------------------------
 # 0) CONFIG
