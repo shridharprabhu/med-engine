@@ -78,10 +78,12 @@ def require_auth():
 
 
 
+require_auth()
+logout_button()
 
 
-
-
+st.sidebar.success(f"Logged in as: {st.session_state['sb_user'].email}")
+st.sidebar.write(st.session_state["profile"])
 
 
 
