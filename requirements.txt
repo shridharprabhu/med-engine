@@ -1,7 +1,7 @@
 streamlit
 matplotlib
-
 numpy
-nginx
+
 supabase-py
+
 
