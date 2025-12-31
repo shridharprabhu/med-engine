@@ -1,7 +1,10 @@
-streamlit
+
 matplotlib
 numpy
 
-supabase-py
+
+streamlit>=1.30
+supabase-py==2.3.1
+requests>=2.31
 
 
