@@ -4,8 +4,9 @@ numpy
 
 
 streamlit>=1.30
-supabase-py==2.3.1
+supabase
 requests>=2.31
+
 
 
 
